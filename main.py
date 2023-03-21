@@ -1,5 +1,6 @@
 import gym
 import dqn
+import pg
 import random
 import torch
 import numpy as np
@@ -13,6 +14,13 @@ def same_seed(seed):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
+def get_agent_by_name(name: str):
+    if name == 'dqn':
+        return dqn.DQNAgent
+    elif name == 'pg':
+        return pg.ReinforceAgent
+    return None
+
 env = gym.make("LunarLander-v2", render_mode="human")
 env.action_space.seed(114514)
 
@@ -25,13 +33,11 @@ if __name__ == "__main__":
     same_seed(19260817)
     epsidoes = 50000
     steps = 0
-    agent = dqn.DQNAgent(state_dim, action_dim)
+    agent = get_agent_by_name('dqn')(state_dim, action_dim)
     agent.enable_train()
     for i in range(epsidoes):
         print("round: %d" % (i))
         total_reward = 0.0
-        if epsidoes == 50:
-            agent.set_train_status(False)
         terminated, truncated = False, False
         last_action, action, last_state = None, 0, None
         while not terminated and not truncated:
@@ -39,7 +45,7 @@ if __name__ == "__main__":
             steps += 1
             total_reward += reward
             if last_state is not None:
-                agent.add_to_memory(last_state, action, reward, state, terminated) 
+                agent.add_to_memory(last_state, action, reward, state, terminated or truncated) 
             # training with interacting environments
             action = agent.select_action(state)
             last_state = state

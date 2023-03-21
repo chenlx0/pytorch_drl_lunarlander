@@ -1,17 +1,17 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.nn.init as init
 
 import numpy as np
 import random
 
 from collections import namedtuple
-
-from net import DRLNet, weight_init
+from net import PGNet, weight_init
 
 Gamma = 0.99
 Epsilon = 0.01
-LearningRate = 1e-3
+LearningRate = 1e-2
 BatchSize = 128
 MaxBufferSize = 128 * 128
 
@@ -19,15 +19,13 @@ Transition = namedtuple('Transition',
                         ('state', 'action', 'next_state', 'reward', 'done'))
 
 
-class DQNAgent(object):
+class ReinforceAgent(object):
     def __init__(self, env_dim, action_dim):
         self.env_dim = env_dim
         self.action_dim = action_dim
         self.do_train = True
-        self.target_network = DRLNet(env_dim, action_dim)
-        self.policy_network = DRLNet(env_dim, action_dim)
-        weight_init(self.target_network)
-        self.policy_network.load_state_dict(self.target_network.state_dict())
+        self.pg_net = PGNet(env_dim, action_dim)
+        weight_init(self.pg_net)
         self.criterion = nn.MSELoss()
         self.optimizer = torch.optim.SGD(self.policy_network.parameters(), lr=LearningRate, momentum=0.9, weight_decay=1e-5)
 
@@ -35,7 +33,7 @@ class DQNAgent(object):
         self.do_train = True
         self.cur_reward = 0.0
         self.steps = 0
-        self.replay_buffer = []
+        self.trajectory = []
 
     def disable_train(self):
         self.enable_train = False
@@ -46,17 +44,18 @@ class DQNAgent(object):
 
     @torch.no_grad()
     def select_action(self, state):
-        if random.random() < Epsilon or len(self.replay_buffer) < BatchSize * 2:
+        if len(self.trajectory) < BatchSize * 2:
             return random.choice(range(self.action_dim))
         state = torch.from_numpy(state)
-        act_probs = self.target_network(state)
-        return act_probs.argmax().item()
+        # select according to probability distribution
+        prob = self.pg_net(state)
+        return torch.multinomial(prob, 1).item()
 
     def add_to_memory(self, state, action, reward, next_state, done):
-        if len(self.replay_buffer) >= MaxBufferSize:
-            self.replay_buffer.pop()
+        if len(self.trajectory) >= MaxBufferSize:
+            self.trajectory.pop()
         reward = float(reward)
-        self.replay_buffer.insert(0, Transition(torch.from_numpy(state), 
+        self.trajectory.insert(0, Transition(torch.from_numpy(state), 
                                              torch.tensor([action]), 
                                              torch.from_numpy(next_state), 
                                              torch.tensor([reward]), done))
@@ -65,24 +64,15 @@ class DQNAgent(object):
         self.target_network.load_state_dict(self.policy_network.state_dict())
         
     def learn_by_replay(self):
-        if len(self.replay_buffer) <= BatchSize:
+        if len(self.trajectory) <= BatchSize or not self.enable_train:
             return
         # Random choose BATCH_SIZE transitions.
-        samples = random.sample(self.replay_buffer, BatchSize)
+        samples = random.sample(self.trajectory, BatchSize)
         states_batch = torch.stack([t.state for t in samples])
         next_states_batch = torch.stack([t.next_state for t in samples])
         actions_batch = torch.cat([t.action for t in samples]).to(torch.int64)
         rewards_batch = torch.stack([t.reward for t in samples])
         done_batch = torch.cat([torch.Tensor([t.done]) for t in samples])
 
-        # Update policy_network
-        with torch.no_grad():
-            q_next = self.target_network(next_states_batch).max(1)[0].detach()
-        act_vals = self.policy_network(states_batch).gather(dim=1, index=actions_batch.unsqueeze(1))
-        label = rewards_batch.reshape(-1) + Gamma * q_next * (1 - done_batch)
-        loss = self.criterion(act_vals, label.unsqueeze(1))
-        print("loss ", loss)
-        self.optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_value_(self.policy_network.parameters(), 100)
-        self.optimizer.step()
+        # Update pg net, maximize Log-Likelyhood, minimize cross entropy
+
